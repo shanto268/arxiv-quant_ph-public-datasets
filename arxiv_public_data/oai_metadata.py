@@ -24,17 +24,18 @@ Resources
 * https://arxiv.org/help/oa/index
 """
 
-import os
-import gzip
-import glob
-import json
-import time
-import hashlib
 import datetime
-import requests
+import glob
+import gzip
+import hashlib
+import json
+import os
+import time
 import xml.etree.ElementTree as ET
 
-from arxiv_public_data.config import LOGGER, DIR_BASE
+import requests
+
+from arxiv_public_data.config import DIR_BASE, LOGGER
 
 log = LOGGER.getChild('metadata')
 
@@ -187,63 +188,72 @@ def find_default_locations():
         return fn_outfile[-1]
     return None
 
-def all_of_arxiv(outfile=None, resumptionToken=None, autoresume=True):
+def all_of_arxiv(outfile=None, resumptionToken=None, autoresume=True, filter_category=None):
     """
-    Download the metadata for every article in the ArXiv via the OAI API
+    Download the metadata for every article in the ArXiv via the OAI API,
+    optionally filtering for a specific category during the download.
 
     Parameters
     ----------
         outfile : str (default './arxiv-metadata-oai-<date>.json')
-            name of file where data is stored, appending each chunk of 1000
+            Name of file where data is stored, appending each chunk of 1000
             articles.
         resumptionToken : str (default None)
-            token which instructs the OAI server to continue feeding the next
-            chunk
+            Token which instructs the OAI server to continue feeding the next
+            chunk.
         autoresume : bool
             If true, it looks for a saved resumptionToken in the file
-            <outfile>-resumptionToken.txt
+            <outfile>-resumptionToken.txt.
+        filter_category : str (optional)
+            If provided, only metadata entries with this category will be saved.
     """
     date = str(datetime.datetime.now()).split(' ')[0]
 
     outfile = (
-        outfile or # user-supplied
-        find_default_locations() or # already in progress 
+        outfile or
+        find_default_locations() or
         os.path.join(
-            DIR_BASE, 'arxiv-metadata-oai-{}.json.gz'.format(date)
-        ) # new file
+            DIR_BASE, f'arxiv-metadata-oai-{date}.json.gz'
+        )
     )
 
     directory = os.path.split(outfile)[0]
     if directory and not os.path.exists(directory):
         os.makedirs(directory)
-    tokenfile = '{}-resumptionToken.txt'.format(outfile)
+    tokenfile = f'{outfile}-resumptionToken.txt'
     chunk_index = 0
     total_records = 0
 
-    log.info('Saving metadata to "{}"'.format(outfile))
+    log.info(f'Saving metadata to "{outfile}"')
 
-    resumptionToken = None
     if autoresume:
         try:
             resumptionToken = open(tokenfile, 'r').read()
-        except Exception as e:
-            log.warn("No tokenfile found '{}'".format(tokenfile))
+        except FileNotFoundError:
+            log.warn(f"No tokenfile found '{tokenfile}'")
             log.info("Starting download from scratch...")
 
     while True:
-        log.info('Index {:4d} | Records {:7d} | resumptionToken "{}"'.format(
-            chunk_index, total_records, resumptionToken)
-        )
+        log.info(f'Index {chunk_index:4d} | Records {total_records:7d} | resumptionToken "{resumptionToken}"')
         xml_root = ET.fromstring(get_list_record_chunk(resumptionToken))
         check_xml_errors(xml_root)
         records, resumptionToken = parse_xml_listrecords(xml_root)
 
-        chunk_index = chunk_index + 1
-        total_records = total_records + len(records)
+        filtered_records = []
+        for rec in records:
+            if filter_category:
+                if filter_category in rec.get("categories", []):
+                    filtered_records.append(rec)
+            else:
+                filtered_records.append(rec)
+
+        chunk_index += 1
+        total_records += len(filtered_records)
 
         with gzip.open(outfile, 'at', encoding='utf-8') as fout:
-            for rec in records:
+            for rec in filtered_records:
                 fout.write(json.dumps(rec) + '\n')
+
         if resumptionToken:
             with open(tokenfile, 'w') as fout:
                 fout.write(resumptionToken)
@@ -252,6 +262,7 @@ def all_of_arxiv(outfile=None, resumptionToken=None, autoresume=True):
             return
 
         time.sleep(12)  # OAI server usually requires a 10s wait
+
 
 def load_metadata(infile=None):
     """
@@ -291,3 +302,21 @@ def validate_abstract_hashes(metadata, metadata_no_abstract):
         if not md5 == n['abstract_md5']:
             return False
     return True
+
+def filter_quant_ph(input_file, output_file):
+    """
+    Filter articles for the quant-ph category from the downloaded metadata.
+
+    Parameters
+    ----------
+    input_file : str
+        Path to the input metadata JSON file (gzip-compressed).
+    output_file : str
+        Path to save the filtered metadata JSON file (gzip-compressed).
+    """
+    with gzip.open(input_file, 'rt', encoding='utf-8') as fin, gzip.open(output_file, 'wt', encoding='utf-8') as fout:
+        for line in fin:
+            record = json.loads(line)
+            if "categories" in record and "quant-ph" in record["categories"]:
+                fout.write(json.dumps(record) + "\n")
+    log.info(f"Filtered quant-ph metadata saved to {output_file}")
